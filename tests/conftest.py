@@ -10,12 +10,20 @@ from core import settings
 from core.database import initialize_database
 from src.app.app import app
 
+pytest_plugins = ["pytest_asyncio"]
 
 @pytest.fixture(scope="session")
 def event_loop() -> AbstractEventLoop:
     """Ивент луп"""
     return asyncio.get_event_loop()
 
+@pytest.fixture(autouse=True)
+def fix_asyncio_event_loop(monkeypatch, event_loop: asyncio.AbstractEventLoop):
+    """
+    Залипляем asyncio.get_event_loop() на pytest-овый event_loop,
+    чтобы motor/Beanie и тесты работали в одном loop.
+    """
+    monkeypatch.setattr(asyncio, "get_event_loop", lambda: event_loop)
 
 @pytest.fixture(autouse=True, scope="session")
 async def init_db() -> None:
@@ -41,3 +49,4 @@ async def client() -> AsyncGenerator[AsyncClient]:
         base_url="http://testserver",
     ) as client:
         yield client
+
