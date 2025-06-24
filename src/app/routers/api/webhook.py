@@ -5,11 +5,11 @@ from predict.mock_llm_call import mock_llm_call
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from typing import Optional
 from bson import ObjectId
-
 import httpx
-router = APIRouter(prefix="/webhook")
 
+router = APIRouter(prefix="/webhook")
 bearer = HTTPBearer(auto_error=False)
+
 
 async def get_chatbot(
     creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)
@@ -22,59 +22,70 @@ async def get_chatbot(
         raise HTTPException(status_code=403, detail="Недействительный токен")
     return cb
 
-#async def get_chatbot(
-#    creds: HTTPAuthorizationCredentials = Depends(bearer)
-#):
-#    if creds is None or creds.scheme.lower() != "bearer":
-#        raise HTTPException(status_code=401, detail="Недостаточно прав")
-#    cb = await ChatBot.find_one(ChatBot.secret_token == creds.credentials)
-#    if not cb:
-#        raise HTTPException(status_code=403, detail="Недействительный токен")
-#    return cb
 
 @router.post("/new_message", status_code=200)
 async def inbound_message(
     msg: IncomingMessage,
     background: BackgroundTasks,
-    #cb=Depends(get_chatbot),
     creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)
 ):
     if creds is None or creds.scheme.lower() != "bearer":
         raise HTTPException(status_code=401, detail="Недостаточно прав")
     secret = creds.credentials
-    print(secret)
-    # Найти текущий диалог
+
     dialog = await Dialogue.find_one({"_id": ObjectId(secret)})
     if not dialog:
         raise HTTPException(status_code=404, detail="not found")
 
-    # Проверяем только последнее сообщение, чтобы избежать дубликатов
     if dialog.message_list:
         last_msg = dialog.message_list[-1]
         if last_msg.text == msg.message_id:
             return {}
 
-    # Сохраняем входящее сообщение пользователя
+    # Добавляем пользовательское сообщение
     dialog.message_list.append(DialogueMessage(role=MessageRole.USER, text=msg.text))
     await dialog.save()
 
-    # Генерируем ответ от LLM
-    reply = await mock_llm_call(dialog.message_list) #FIXME это явно стопает поток, надо перенести в background
+    # Отправляем в фон дальнейшую обработку
+    background.add_task(
+        process_and_respond,
+        dialog.id,
+        msg.chat_id,
+        msg.message_sender,
+    )
+
+    return {}  # Ответ немедленно
+
+
+async def process_and_respond(dialog_id: ObjectId, chat_id: str, sender: str):
+    # Повторно достаём диалог (безопасно для фоновой задачи)
+    dialog = await Dialogue.find_one({"_id": dialog_id})
+    if not dialog:
+        print(f"Диалог {dialog_id} не найден")
+        return
+
+    # Генерация ответа
+    reply = await mock_llm_call(dialog.message_list)
+
+    # Сохраняем ответ
     dialog.message_list.append(DialogueMessage(role=MessageRole.ASSISTANT, text=reply))
     await dialog.save()
-    print(msg.message_sender)
-    if msg.message_sender == "customer":
-        background.add_task(
-            send_reply,
-            str(dialog.webhook_url),
-            dialog.id,
-            msg.chat_id,
-            reply
+
+    # Отправка ответа, если инициатор — клиент
+    if sender == "customer":
+        await send_reply(
+            url=str(dialog.webhook_url),
+            token=str(dialog.id),
+            chat_id=chat_id,
+            text=reply
         )
-    return {}
+
 
 async def send_reply(url, token, chat_id, text):
     payload = OutgoingPayload(chat_id=chat_id, text=text)
     headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient() as client:
-        await client.post(url, json=payload.dict(), headers=headers)
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(url, json=payload.dict(), headers=headers)
+    except Exception as e:
+        print(f"Ошибка при отправке ответа: {e}")

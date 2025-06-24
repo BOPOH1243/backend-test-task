@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from beanie import PydanticObjectId
 from core.database.models import ChatBot
 from .schemas import ChatBotCreate, ChatBotUpdate, ChatBotResponse
-
+from bson import ObjectId
 # Инициализация приложения
 router = APIRouter()
 
@@ -16,7 +16,6 @@ async def create_chatbot(chatbot: ChatBotCreate):
     chatbot_data = jsonable_encoder(chatbot)
     new_chatbot = ChatBot(**chatbot_data)
     await new_chatbot.insert()
-    print(new_chatbot)
     return new_chatbot
 
 
